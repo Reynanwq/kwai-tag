@@ -27,13 +27,13 @@ O fluxo real, simplificado mas fiel nos pontos que doem:
 ```
                       POST /api/tag/packOrders
  ┌──────────────┐   {accountId, groupId, orderIds}   ┌──────────────────────────────┐
- │ hub-simulator │ ─────────────────────────────────▶ │           kwai-tag            │
+ │ hub-simulator │ ─────────────────────────────────▶ │     kwai-tag (kwaidb)         │
  │ (core Gubee)  │ ◀── 202 Accepted ───────────────── │  TagResource                  │
- │               │                                    │    └▶ Kafka tag.download      │
- │  Mongo:       │                                    │  DownloadTagConsumer          │
- │  tag_group    │   POST /tag/package/upload/url     │    └▶ DownloadTagUseCase      │
- │  tag_package  │ ◀───────────────────────────────── │        ├ Mongo: delivery_label│
- │               │   Kafka tag.package.publisherror   │        └ KwaiClient ──────────┼──┐
+ │               │                                    │    └▶ kwaitagservice.tag.download
+ │  Mongo tagdb: │                                    │  DownloadTagConsumer          │
+ │  TAG_GROUP    │   POST /tag/package/upload/url     │    └▶ DownloadTagUseCase      │
+ │  TAG_PACKAGE  │ ◀───────────────────────────────── │   ├ ORDER_DELIVERY_LABEL      │
+ │               │ tagservice.package.publisherror    │        └ KwaiClient ──────────┼──┐
  │               │ ◀───────────────────────────────── │                               │  │
  └──────────────┘                                    └──────────────────────────────┘  │
                                                                                          ▼
@@ -44,6 +44,16 @@ O fluxo real, simplificado mas fiel nos pontos que doem:
                                                               │  /logistics/deliveryDocumentV2  │
                                                               │  cenários: NOT_FOUND→DOING→OK   │
                                                               └────────────────────────────────┘
+
+ Caminho de erro (a partir da Fase 8B):
+
+ kwai-tag ──(esgotou tentativas)──▶ errorservice.error.handler ──▶ ┌──────────────────────────────┐
+    ▲                                                              │ error-service-simulator       │
+    │   republica a mensagem original no tópico de origem          │  (errordb)                    │
+    └──────────────────── depois do backoff ────────────────────── │  ERROR_CONFIG: política/exceção│
+                                                                   │  ERROR_ITEM: tentativas       │
+ kwai-tag ──(boot) POST /errors/configs ─────────────────────────▶ │  esgotou → DEAD_ITEM          │
+                                                                   └──────────────────────────────┘
 ```
 
 Regras do Kwai que a simulação **precisa** respeitar (são elas que geram os problemas):
@@ -72,6 +82,7 @@ Regras do Kwai que a simulação **precisa** respeitar (são elas que geram os p
 | Banco | MongoDB 7 | Igual ao real |
 | API do Kwai | **WireMock** standalone (Docker) com *scenarios* stateful | Simula DOING→READY e injeta falhas sem escrever servidor |
 | Core Gubee | **hub-simulator**: mini app Quarkus próprio | Precisa de lógica (remover pedido do pacote ao receber erro) para os bugs ficarem visíveis |
+| Error service | **error-service-simulator**: mini app Quarkus próprio (Fase 8B) | Reproduz o `gubee-error-handler`: política por exceção, tentativas acumuladas e republicação. Sem ele, metade dos problemas de retry não aparece |
 | Testes | JUnit 5, MockK, Testcontainers, WireMock embutido | Unitário no domínio, integração nos adapters |
 | Resiliência | SmallRye Fault Tolerance (ou resilience4j) | Circuit breaker e retry de transporte |
 
@@ -83,6 +94,8 @@ Regras do Kwai que a simulação **precisa** respeitar (são elas que geram os p
 kwai-tag/
 ├── PLANEJAMENTO.md            (este arquivo)
 ├── DIARIO.md                  (o que quebrou e como resolvi — escrever ao longo das fases)
+├── ERROS.md                   (catálogo: código → exceção → categoria → ação — preencher antes de codar)
+├── KAFKA.md                   (tópicos, keys e garantias: durabilidade, idempotência e ordem)
 ├── docker-compose.yml         (kafka, kafka-ui, mongo, wiremock)
 ├── wiremock/
 │   ├── mappings/              (stubs JSON do Kwai)
@@ -91,9 +104,10 @@ kwai-tag/
 ├── tag-domain/                (modelo, portas, use cases, exceções — ZERO dependência de framework)
 ├── tag-kwai-client/           (REST client do Kwai + tradução de envelope)
 ├── tag-hub-client/            (REST client do hub: upload/url)
-├── tag-repository/            (Mongo: delivery_label)
+├── tag-repository/            (Mongo kwaidb: ORDER_DELIVERY_LABEL)
 ├── tag-app/                   (Quarkus: resource, consumer, publisher, config)
-└── hub-simulator/             (Quarkus: POST packOrders→kwai-tag, recebe upload/url e publisherror)
+├── hub-simulator/             (Quarkus: POST packOrders→kwai-tag, recebe upload/url e publisherror)
+└── error-service-simulator/   (Quarkus: consome a DLQ, aplica a política e republica — Fase 8B)
 ```
 
 Regra de dependência (verificar com o build): `tag-domain` não importa nada de Quarkus, Kafka, Mongo
@@ -103,12 +117,18 @@ ou Jackson. Os outros módulos dependem do domínio, nunca o contrário.
 
 ## 4. Contratos
 
+> Bancos, collections e tópicos com **os mesmos nomes do projeto real**, para o que for validado aqui
+> valer direto lá. Bancos: `kwaidb` (kwai-tag), `tagdb` (hub-simulator) e `errordb`
+> (error-service-simulator). Partições: 3 aqui (10 no real; 20 no tópico de erro).
+> Fora de escopo (existem no core, mas não tocam o fluxo Kwai): `PICKING_LIST`, `AUTO_LABEL_SCHEDULE`,
+> `SELLER_PRINTER_CONFIG`, `MARKETPLACE_DANFE_CONFIG` e o tópico `tagservice.group.merge`.
+
 ### 4.1 HTTP — kwai-tag (entrada)
 
 | Método | Path | Body | Resposta |
 |---|---|---|---|
 | POST | `/api/tag/packOrders` | `{sellerId, accountId, tagGroupId, orderIds[], tagType[]}` | `202 {sellerId, accountId, failedOrders[]}`; `400` se faltar campo |
-| GET | `/api/tag/{accountId}/{orderId}` | — | estado do `delivery_label` (diagnóstico) — *extra, não existe no real* |
+| GET | `/api/tag/{accountId}/{orderId}` | — | estado do `ORDER_DELIVERY_LABEL` (diagnóstico) — *extra, não existe no real* |
 | POST | `/api/tag/{accountId}/{orderId}/retry` | — | reseta tentativas e republica — *extra, fase 9* |
 
 ### 4.2 HTTP — kwai-fake (WireMock imitando o Kwai)
@@ -128,26 +148,29 @@ Query params comuns: `appKey`, `merchantId`, `ts`, `version=1.0`, `sign`. Na fas
 
 | Método | Path | Comportamento |
 |---|---|---|
-| POST | `/tag/package/upload/url/{groupId}` | `{orderIds, packageType, redirectUrl, sellerId}` → cria `tag_package` |
-| POST | `/simulate/group` | cria um `tag_group` e chama `packOrders` no kwai-tag (dispara o fluxo) |
+| POST | `/tag/package/upload/url/{groupId}` | `{orderIds, packageType, redirectUrl, sellerId}` → cria documento em `TAG_PACKAGE` |
+| POST | `/simulate/group` | cria um `TAG_GROUP` e chama `packOrders` no kwai-tag (dispara o fluxo) |
 | GET | `/simulate/group/{groupId}` | mostra o grupo, os pacotes e os erros |
 
-Ao consumir `tag.package.publisherror`, o hub **remove o pedido de pacotes já existentes**
+Ao consumir `tagservice.package.publisherror`, o hub **remove o pedido de pacotes já existentes**
 (igual ao `PublishErrorPackageImpl.removeErrorOrdersFromExistingPackages` do real) e recalcula o
 status do grupo (`PROCESSING` / `PARTIALLY_COMPLETE` / `COMPLETE` / `ERROR`).
 
 ### 4.4 Kafka
 
+> Configuração de producer/consumer/tópicos e o raciocínio de durabilidade, idempotência e ordem
+> estão no `KAFKA.md`.
+
 | Tópico | Produtor | Consumidor | Key | Payload |
 |---|---|---|---|---|
-| `kwaitag.tag.download` | kwai-tag | kwai-tag | **decisão da fase 7** (real usa `accountId`) | `{orders:[{orderId}]}` + headers `ACCOUNT_ID`, `TAG_GROUP_ID`, `TAG_TYPE`, `CORRELATION_ID` |
-| `kwaitag.tag.download.retry` | kwai-tag | kwai-tag | idem | idem — *fase 8, retry não-bloqueante* |
-| `kwaitag.tag.download.dlq` | kwai-tag | ninguém (inspeção manual) | idem | original + headers `dlq-reason`, `dlq-attempts`, `dlq-exception` |
-| `tag.package.publisherror` | kwai-tag | hub-simulator | `sellerId` | `{sellerId, groupId, failedOrders:[{orderId, errorMessageCode, errorMessageDescription}]}` |
+| `kwaitagservice.tag.download` | kwai-tag | kwai-tag | **decisão da fase 7** (real usa `accountId`) | `{orders:[{orderId}]}` + headers `ACCOUNT_ID`, `TAG_GROUP_ID`, `TAG_TYPE`, `CORRELATION_ID` |
+| `kwaitagservice.tag.download.retry` | kwai-tag | kwai-tag | idem | idem — *fase 8, retry não-bloqueante. **Não existe no real**: é experimento* |
+| `errorservice.error.handler` | kwai-tag | até a Fase 8: ninguém (inspeção no Kafka UI). A partir da 8B: error-service-simulator | idem | original + headers da seção 4.6 |
+| `tagservice.package.publisherror` | kwai-tag | hub-simulator | `sellerId` | `{sellerId, groupId, failedOrders:[{orderId, errorMessageCode, errorMessageDescription}]}` |
 
 ### 4.5 Mongo
 
-`delivery_label` (kwai-tag) — `_id = "<accountId>:<orderId>"` com escape do `:`.
+`kwaidb.ORDER_DELIVERY_LABEL` (kwai-tag) — `_id = "<accountId>:<orderId>"` com escape do `:`.
 
 | Campo | Tipo | Nota |
 |---|---|---|
@@ -160,7 +183,52 @@ status do grupo (`PROCESSING` / `PARTIALLY_COMPLETE` / `COMPLETE` / `ERROR`).
 | trackingNumber, shippingLabelUrl, failureCode, failureMessage | String? | |
 | version | Long | lock otimista |
 
-`tag_group` e `tag_package` (hub-simulator) — modelo mínimo para ver o efeito dos erros.
+`tagdb.TAG_GROUP` e `tagdb.TAG_PACKAGE` (hub-simulator) — versão enxuta das collections do core,
+só com o necessário para ver o efeito dos erros (grupo, pedidos, status, URL, erros).
+
+`errordb.ERROR_CONFIG` (error-service-simulator) — uma por serviço: `_id = serviceName`,
+`configVersion`, `items[{groupId, backOff{interval, maxInterval, maxAttempts, multiplier}, deadChannel,
+tags{category}, rateLimiters}]`.
+
+`errordb.ERROR_ITEM` (error-service-simulator) — uma por mensagem com erro:
+`_id = "<ERROR_CORRELATION_ID>:<tópico>"`, `groupId`, `topic`, `partition`, `sellerId`, `accountId`,
+`message{headers, body}`, `attempts`, `errorMessage`, `state` (`NEW | WAITING | PROCESSING | PROCESSED |
+DEAD_ITEM`), `version`, `createdDt`, `lastModifiedDt`.
+
+### 4.6 Contrato do error-service (igual ao `gubee-error-handler`)
+
+**Registro da política (no boot do kwai-tag):** `POST /errors/configs`
+
+```
+{ serviceName: "kwaitagservice-default", configVersion: 2,
+  items: [ { groupId: "kwaitagservice-default:<FQCN da exceção>",
+             backOff: { interval, maxInterval, maxAttempts, multiplier },
+             deadChannel: null, tags: { category: "BUSINESS" }, rateLimiters: [] } ] }
+```
+
+Regra do real que vamos manter de propósito: **só grava se o par `(serviceName, configVersion)` ainda
+não existe.** Mudar a política sem subir a versão não tem efeito (experimento E4).
+
+**Mensagem na DLQ** (`errorservice.error.handler`): payload e headers originais +
+
+| Header | Valor |
+|---|---|
+| `dead-letter-reason` | `groupId` da linha da política que casou com a exceção |
+| `dead-letter-cause` | mensagem da exceção |
+| `dead-letter-topic`, `dead-letter-partition`, `dead-letter-offset` | origem da mensagem |
+| `kafka_dlt-original-partition` | partição original (usada na republicação) |
+| `APP_ID` | `kwaitagservice-default` (fallback de busca da política) |
+| `ERROR_CORRELATION_ID` | criado pelo error-service na 1ª vez e **preservado** nas voltas — é o que acumula as tentativas |
+
+**Como a política é escolhida:** primeiro a linha cujo `groupId` termina com o nome exato da classe;
+senão a primeira linha cuja classe seja superclasse da exceção (mais específica primeiro); senão
+`<APP_ID>:java.lang.Exception`; senão **nada** (o real só loga "config not found" e descarta).
+
+**Decisão por mensagem:** `attempts + 1 <= maxAttempts` → `WAITING`, agenda republicação com o
+intervalo do backoff; senão → `DEAD_ITEM` (e publica em `deadChannel`, se houver).
+
+**Reprocessamento manual:** `POST /errors/reprocesses` com filtros (`sellerId`, `topic`, `groupId`,
+`status`, `ids`) → zera `attempts` e republica.
 
 ---
 
@@ -173,7 +241,7 @@ Cada fase tem: **construir** → **testar** → **quebrar** → **anotar**.
 - [ ] `docker-compose.yml` com Kafka KRaft (1 broker), Kafka UI, MongoDB 7 e WireMock (porta 8089,
       volume `./wiremock`).
 - [ ] Criar os tópicos com **3 partições** (necessário para os experimentos de ordem).
-- [ ] Aggregator Maven com os 6 módulos vazios compilando.
+- [ ] Aggregator Maven com os 7 módulos vazios compilando.
 - [ ] Um stub WireMock trivial respondendo `{result:200}` e testado com `curl`.
 
 **Pronto quando:** `docker compose up` sobe tudo; `mvn -q verify` passa; Kafka UI mostra os tópicos.
@@ -260,7 +328,7 @@ Testes de integração com WireMock embutido (`@QuarkusTestResource`): um por li
 
 ### Fase 4 — Persistência (1 dia)
 
-- [ ] `delivery_label` com Panache, `_id` composto e escape do `:`.
+- [ ] `ORDER_DELIVERY_LABEL` com Panache, `_id` composto e escape do `:`.
 - [ ] Lock otimista por `version` (atualização condicional: `updateOne` filtrando `_id` e `version`).
 - [ ] Testcontainers Mongo.
 
@@ -274,7 +342,7 @@ Antes de qualquer lib, um `KafkaConsumer` puro num loop:
 
 - [ ] `enable.auto.commit=false`; commit **depois** do processamento (at-least-once).
 - [ ] Retry em memória com backoff exponencial + jitter, contando tentativas em um header.
-- [ ] Quando esgota: publica na DLQ com os headers de diagnóstico e commita o original.
+- [ ] Quando esgota: publica em `errorservice.error.handler` com os headers da seção 4.6 e commita o original.
 - [ ] Deserialização inválida (poison pill) vai direto para a DLQ, sem travar a partição.
 - [ ] `TagResource.packOrders` → `CreateTagUseCase` → producer (com `acks=all` e idempotência do producer ligada).
 - [ ] MDC por mensagem: `correlationId`, `accountId`, `groupId`, `orderId`; `MDC.clear()` no `finally`.
@@ -288,7 +356,7 @@ Antes de qualquer lib, um `KafkaConsumer` puro num loop:
 
 ### Fase 6 — Hub simulado e fluxo ponta a ponta (1–2 dias)
 
-- [ ] `hub-simulator` com `tag_group` / `tag_package`, endpoint `upload/url` e consumer de `publisherror`
+- [ ] `hub-simulator` com `TAG_GROUP` / `TAG_PACKAGE`, endpoint `upload/url` e consumer de `publisherror`
       com a lógica de **remover o pedido do pacote**.
 - [ ] `POST /simulate/group` com os pedidos `1001,1002,1003` → acompanhar até o grupo ficar
       `PARTIALLY_COMPLETE` (1003 falhou).
@@ -326,7 +394,7 @@ Implementar e comparar. Cada técnica tem um cenário do WireMock que a justific
 | T1 | **Classificação** retryable / não-retryable / estado de negócio | markers + tabela `result→exceção` | 443 não re-tenta; 11011 re-tenta; 11012 publica falha |
 | T2 | **Retry bloqueante** com backoff exponencial + jitter + teto | config do consumer | `1001` completa; ver intervalos no log |
 | T3 | **Retry não-bloqueante** (tópico de retry com `processAfter`) | tópico `.retry` + header de agendamento | repetir 7.1: o grupo B deixa de esperar |
-| T4 | **DLQ** com contexto | headers `dlq-*`; ferramenta de reprocessar da DLQ | `1005` termina na DLQ com o motivo legível |
+| T4 | **DLQ** com contexto | headers da seção 4.6 (`dead-letter-reason`, `dead-letter-cause`...); reprocessamento vem na Fase 8B | `1005` termina na DLQ com o motivo legível |
 | T5 | **Idempotência do efeito colateral** | `deliveryRequestedAt` persistido **antes** de chamar `createDelivery` (padrão "intenção antes da ação") | `1011` e `1008`: exatamente 1 `createDelivery` |
 | T6 | **Timeout total de negócio** ≠ max-retries | guard por `firstAttemptAt` no use case | `1004` vira TIMEOUT em ~10 min, sem loop |
 | T7 | **Circuit breaker** por conta+operação | Fault Tolerance | 20 falhas `1009` seguidas abrem o circuito; outras contas seguem |
@@ -336,6 +404,40 @@ Implementar e comparar. Cada técnica tem um cenário do WireMock que a justific
 | T11 | **Outbox transacional** (opcional, avançado) | gravar label + evento no Mongo na mesma operação e publicar via relay | matar o app entre "salvar READY" e "publicar": nada se perde |
 
 Para cada técnica, escrever no `DIARIO.md`: **problema → técnica → custo** (o que ela piora).
+
+**Antes de começar a fase:** preencher a coluna "Decisão" do `ERROS.md`. Cada linha do catálogo vira
+um teste.
+
+### Fase 8B — Error service simulado (2–3 dias)
+
+Construir o `error-service-simulator` seguindo o contrato da seção 4.6. Ele é **pequeno de propósito**:
+o objetivo é enxergar a segunda camada de retry, não reescrever o `gubee-error-handler`.
+
+- [ ] `POST /errors/configs` com a regra do `configVersion`.
+- [ ] Consumer de `errorservice.error.handler`: monta o `ERROR_ITEM`, escolhe a política, decide
+      `WAITING` ou `DEAD_ITEM`.
+- [ ] Delay: job agendado que varre `ERROR_ITEM` em `WAITING` vencidos e republica no tópico de origem.
+      Começar com **tick de 60 s, igual ao real**, para sentir o efeito (E2).
+- [ ] `POST /errors/reprocesses`.
+- [ ] No kwai-tag: `ErrorConfiguration` montando a política e registrando no boot; o handler da DLQ
+      preenchendo os headers da seção 4.6.
+
+Experimentos (cada um reproduz algo que existe hoje no real):
+
+| # | Experimento | Como provocar | O que medir / concluir |
+|---|---|---|---|
+| E1 | **Retries multiplicados** | `1005` (11014 para sempre) com política 3 tentativas no error-service e 20 no consumer | Contar chamadas ao Kwai no `/__admin/requests`. Esperado ≈ (1 + 3) × 20 = 80. Qual camada deveria ser dona do retry? |
+| E2 | **Intervalo real ≠ configurado** | Política de 5 s com tick de 60 s | Medir o intervalo real entre as voltas. Trocar o tick para 5 s e comparar |
+| E3 | **Falha anunciada antes da hora** | Notificar o hub a cada ida para a DLQ (igual ao real), com `1001` que só fica pronto depois de algumas voltas | O hub recebe "falhou" e depois recebe a etiqueta? O pedido some do pacote e volta? Onde a notificação deveria ficar? |
+| E4 | **Política que não chega** | Mudar o backoff no kwai-tag **sem** subir `configVersion` | Ver no `ERROR_CONFIG` que nada mudou. Qual política foi usada de fato? |
+| E5 | **Rate limiter que nunca age** | Montar o `RateLimiter` sem `enabledForChannel` (igual ao real, onde o `@Builder` do Lombok zera o campo) com `1006` | O limite é aplicado? Corrigir definindo o canal e medir de novo |
+| E6 | **Classificação pela causa raiz** | Lançar `UnavailableServiceException(cause = SocketTimeoutException)` com `1008` | Qual `dead-letter-reason` saiu? Classificar pela exceção de domínio e comparar |
+| E7 | **Não-retryable que volta** | `UnprocessableEntityException` na lista de não-retryable do consumer, mas coberta por uma política de 5 tentativas no error-service | Quantas vezes o erro voltou? Alinhar as duas listas |
+| E8 | **Erro sem política** | Lançar uma exceção sem linha na política e sem linha de `Exception` | A mensagem some. Onde deveria parar? |
+| E9 | **Tentativas acumuladas** | Remover o header `ERROR_CORRELATION_ID` na republicação | O contador zera a cada volta → loop infinito. Por que o header é essencial? |
+
+**Pronto quando:** E1–E9 estão no `DIARIO.md` com número medido e conclusão, e a política final do
+kwai-tag está no `ERROS.md` com as duas camadas de retry **coerentes entre si**.
 
 ### Fase 9 — Reproduzir e corrigir os bugs do projeto real (2 dias)
 
@@ -350,8 +452,10 @@ Cada item: **teste vermelho primeiro**, depois a correção.
 | **E** — grupo lento trava a conta | fase 7.1 | key por `orderId` ou retry não-bloqueante (T3) |
 | **F** — `createDelivery` duplicado por retry de transporte | `1008` | T5 + sem retry de transporte cego no create |
 | **G** — pedido FAILED preso para sempre | `1003`, depois `POST /retry` | endpoint de retry manual que permite novo `createDelivery` de forma explícita |
+| **H** — seller avisado de falha enquanto ainda há retry | E3 | notificar o hub só no `DEAD_ITEM` (ou quando o use case decide que é terminal), nunca a cada ida à DLQ |
+| **I** — política nova ignorada | E4 | versão da política derivada do conteúdo (hash) ou teste que falha se a política mudar sem subir a versão |
 
-**Pronto quando:** os 7 testes passam e o cenário da fase 6 roda com `1001..1011` juntos sem nenhum
+**Pronto quando:** os 9 testes passam e o cenário da fase 6 roda com `1001..1011` juntos sem nenhum
 pedido perdido, duplicado ou removido indevidamente.
 
 ### Fase 10 — Observabilidade (1 dia)
@@ -377,6 +481,7 @@ o Kafka volta? Os números das métricas batem com o que aconteceu?
 | Mongo fora | `docker stop mongo` | erro retryable? mensagem perdida? |
 | Kafka fora | `docker stop kafka` | `packOrders` responde o quê? |
 | Rebalance | subir 2ª instância do app | mensagens em voo, ordem |
+| Error service fora | `docker stop` do error-service-simulator | a DLQ acumula? ao voltar, reprocessa tudo? o kwai-tag sobe sem conseguir registrar a política? |
 
 ---
 
@@ -387,8 +492,9 @@ o Kafka volta? Os números das métricas batem com o que aconteceu?
 | 1 | 0, 1, 2 |
 | 2 | 3, 4, 5 |
 | 3 | 6, 7 |
-| 4 | 8 |
-| 5 | 9, 10, revisão do `DIARIO.md` |
+| 4 | 8, 8B |
+| 5 | 9, 10 |
+| 6 | folga, revisão do `DIARIO.md` e do `ERROS.md` |
 
 ---
 
@@ -400,7 +506,10 @@ o Kafka volta? Os números das métricas batem com o que aconteceu?
 - [ ] Nenhum pedido READY é removido do pacote no hub.
 - [ ] Um grupo lento não atrasa outro grupo da mesma conta.
 - [ ] Cada técnica T1–T10 tem um teste que falha sem ela.
-- [ ] `DIARIO.md` explica, com as minhas palavras, cada bug A–G e por que a correção funciona.
+- [ ] `DIARIO.md` explica, com as minhas palavras, cada bug A–I e por que a correção funciona.
+- [ ] `ERROS.md` completo: todo erro conhecido tem categoria, dono do retry (consumer ou error-service),
+      política e teste. Nenhum erro cai em "sem política".
+- [ ] Nenhum pedido é anunciado como falho ao hub enquanto ainda existe tentativa pendente.
 
 ---
 
@@ -417,4 +526,11 @@ o Kafka volta? Os números das métricas batem com o que aconteceu?
 | Retry de transporte e circuit breaker | `gubee-kwai-error/.../GubeeErrorHandlerImpl.kt` |
 | Lado do core (remoção de pedido) | `gubee-tag/gubee-tag-domain/.../PublishErrorPackageImpl.kt` |
 | Retry e DLQ da lib | `gubee-libs/gubee-parallel-consumer/.../ParallelConsumerManager.java` |
+| Política de erro do kwai-tag | `gubee-kwai-tag-main/.../config/ErrorConfiguration.kt` |
+| Handler que publica na DLQ | `gubee-kwai-tag-main/.../config/parallel/ParallelConsumerErrorHandler.kt` |
+| Lib cliente (política, backoff, tags) | `gubee-error-handler/gubee-error-connector/` (`ErrorConfigBuilder`, `ErrorHandlerUtil`, `ErrorClient`) |
+| Consumo da DLQ | `gubee-error-handler/gubee-error-quarkus-main/.../adapter/ErrorSubscriber.kt` |
+| Decisão retry / DEAD_ITEM | `gubee-error-handler/gubee-error-domain/.../usecase/RetryErrorImpl.kt` |
+| Delay e republicação | `gubee-error-handler/gubee-error-quarkus-main/.../adapter/ErrorHandlerImpl.kt`, `DelayQueueConfiguration.kt` |
+| Máquina de estados do erro | `gubee-error-handler/gubee-error-domain/.../model/ErrorItem.kt` |
 | Doc oficial Kwai (raw) | `gubee-kwai/docs/research/_raw/order-and-logistics.txt` (linhas 697–1510) |
