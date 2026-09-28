@@ -1,0 +1,79 @@
+name: kwai-tag #nome do projeto no Compose
+
+services: # abre a lista dos serviços/containers
+  kafka: #broker
+    image: ${KAFKA_IMAGE}
+    container_name: kwai-kafka
+    ports:
+      - "${KAFKA_HOST_PORT}:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_HOST_PORT}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: [ "CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:29092 > /dev/null 2>&1" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  kafka-init: #criar os tópicos
+    image: ${KAFKA_IMAGE}
+    container_name: kwai-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      BOOTSTRAP_SERVER: kafka:29092
+      TOPIC_PARTITIONS: ${TOPIC_PARTITIONS}
+    entrypoint: [ "sh", "/scripts/create-topics.sh" ]
+    restart: "no"
+
+  kafka-ui: #painel web para visualização
+    image: ${KAFKA_UI_IMAGE} #imagem é a classe e o container o objeto
+    container_name: kwai-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${KAFKA_UI_HOST_PORT}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  mongo:
+    image: ${MONGO_IMAGE}
+    container_name: kwai-mongo
+    ports:
+      - "${MONGO_HOST_PORT}:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  wiremock:
+    image: ${WIREMOCK_IMAGE}
+    container_name: kwai-wiremock
+    ports:
+      - "${WIREMOCK_HOST_PORT}:8080"
+    volumes:
+      - ./wiremock:/home/wiremock
+    command: [ "--global-response-templating", "--verbose" ]
+
+volumes: #responsavel por guardar os dados após a morte do container
+  mongo-data: # vazio para usar as definições padrão

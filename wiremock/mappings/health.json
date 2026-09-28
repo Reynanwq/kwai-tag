@@ -1,0 +1,19 @@
+{
+  "request": {
+    "method": "GET",
+    "url": "/health"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "jsonBody": {
+      "result": 200,
+      "message": "SUCCESS",
+      "data": {
+        "service": "kwai-fake"
+      }
+    }
+  }
+}

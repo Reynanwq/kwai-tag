@@ -1,0 +1,14 @@
+# Saída do Maven
+target/
+
+# IntelliJ
+.idea/
+*.iml
+out/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Logs locais
+*.log
