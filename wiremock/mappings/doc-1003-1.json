@@ -1,0 +1,1 @@
+{"scenarioName":"order-1003","requiredScenarioState":"Started","newScenarioState":"failed","priority":5,"request":{"method":"POST","urlPath":"/rest/open/api/logistics/deliveryDocumentV2","bodyPatterns":[{"matchesJsonPath":"$[?(@.orderId == 1003)]"}]},"response":{"status":200,"headers":{"Content-Type":"application/json"},"jsonBody":{"result":11013,"message":"not_found"}}}

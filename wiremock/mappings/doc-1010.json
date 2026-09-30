@@ -1,0 +1,1 @@
+{"priority":5,"request":{"method":"POST","urlPath":"/rest/open/api/logistics/deliveryDocumentV2","bodyPatterns":[{"matchesJsonPath":"$[?(@.orderId == 1010)]"}]},"response":{"status":200,"headers":{"Content-Type":"application/json"},"jsonBody":{"result":200,"message":"success","data":{"deliveryId":101000,"orderId":1010,"trackingNumber":"TRK1010"}}}}

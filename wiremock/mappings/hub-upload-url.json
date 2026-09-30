@@ -1,0 +1,1 @@
+{"priority":10,"request":{"method":"POST","urlPathPattern":"/tag/package/upload/url/.*"},"response":{"status":200,"headers":{"Content-Type":"application/json"},"jsonBody":{"status":"UPLOADED"}}}

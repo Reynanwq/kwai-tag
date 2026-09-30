@@ -1,0 +1,1 @@
+{"priority":5,"request":{"method":"POST","urlPath":"/rest/open/api/logistics/deliveryDocumentV2","bodyPatterns":[{"matchesJsonPath":"$[?(@.orderId == 1005)]"}]},"response":{"status":200,"headers":{"Content-Type":"application/json"},"jsonBody":{"result":11014,"message":"error"}}}

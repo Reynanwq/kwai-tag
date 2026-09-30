@@ -1,0 +1,62 @@
+# ============================================================================
+# kwai-tag (tag-app) - configuração local
+# Portas do host vêm do .env do docker-compose: Kafka 9092, Mongo 27019, WireMock 8089.
+# ============================================================================
+
+quarkus:
+  application:
+    name: kwaitagservice
+  http:
+    # 8080 já está ocupada nesta máquina.
+    port: 8081
+  devservices:
+    # A infra vem do docker-compose, não dos containers automáticos do Quarkus.
+    enabled: false
+  log:
+    console:
+      format: "%d{HH:mm:ss.SSS} %-5p [%X{groupId}] [%t] %c{2.} - %s%e%n"
+    category:
+      "br.com.kwaitag":
+        level: DEBUG
+  mongodb:
+    connection-string: mongodb://localhost:27019
+    database: kwaidb
+  rest-client:
+    # Kwai falso (WireMock).
+    kwai-api:
+      url: http://localhost:8089
+      connect-timeout: 2000
+      # Menor que o atraso do pedido 1008 (15 s): assim o timeout de leitura acontece.
+      read-timeout: 10000
+    # Hub. Até o hub-simulator existir, o próprio WireMock responde o upload/url.
+    gubee-tag-api:
+      url: http://localhost:8089
+      connect-timeout: 2000
+      read-timeout: 10000
+
+# Usado pela extensão quarkus-kafka-client.
+kafka:
+  bootstrap:
+    servers: localhost:9092
+
+# Credenciais do Kwai falso. O WireMock só confere se o "sign" existe.
+kwai:
+  app-key: local-app-key
+  sign-secret: local-sign-secret
+  access-token: local-access-token
+
+tag:
+  poll:
+    # Tempo total que um pedido pode esperar a etiqueta antes de virar TIMEOUT.
+    total-timeout: PT10M
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer-enabled: true
+    group-id: kwai-tag-consumer
+    download-topic: kwaitagservice.tag.download
+    error-topic: tagservice.package.publisherror
+    dlq-topic: errorservice.error.handler
+    # Retry bloqueante no consumer: 1s, 2s, 4s ... até 60s, no máximo 20 tentativas.
+    max-attempts: 20
+    retry-initial-delay: PT1S
+    retry-max-delay: PT60S

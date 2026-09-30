@@ -13,6 +13,10 @@
     <!-- Cada módulo entra aqui junto com o seu pom.xml: módulo listado sem pom quebra o build. -->
     <modules>
         <module>tag-domain</module>
+        <module>tag-hub-client</module>
+        <module>tag-repository</module>
+        <module>tag-kwai-client</module>
+        <module>tag-app</module>
     </modules>
 
     <properties>
@@ -61,6 +65,21 @@
             <dependency>
                 <groupId>br.com.kwaitag</groupId>
                 <artifactId>tag-domain</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>br.com.kwaitag</groupId>
+                <artifactId>tag-hub-client</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>br.com.kwaitag</groupId>
+                <artifactId>tag-repository</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>br.com.kwaitag</groupId>
+                <artifactId>tag-kwai-client</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

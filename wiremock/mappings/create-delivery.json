@@ -1,0 +1,1 @@
+{"priority":10,"request":{"method":"POST","urlPath":"/rest/open/api/logistics/createDelivery"},"response":{"status":200,"headers":{"Content-Type":"application/json"},"jsonBody":{"result":1,"message":"success"}}}

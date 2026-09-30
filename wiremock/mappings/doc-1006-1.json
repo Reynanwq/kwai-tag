@@ -1,0 +1,1 @@
+{"scenarioName":"order-1006","requiredScenarioState":"Started","newScenarioState":"busy-2","priority":5,"request":{"method":"POST","urlPath":"/rest/open/api/logistics/deliveryDocumentV2","bodyPatterns":[{"matchesJsonPath":"$[?(@.orderId == 1006)]"}]},"response":{"status":200,"headers":{"Content-Type":"application/json"},"jsonBody":{"result":5000,"message":"service busy"}}}
